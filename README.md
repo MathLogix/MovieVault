@@ -28,7 +28,9 @@ We welcome contributions! If you have ideas for improvements or new features, fe
 For any questions or inquiries, contact me at:
 
 📧 Hamed.Semsarian@gmail.com
+
 📧 H.MathLogix@gmail.com
+
 
 ![MovieVault Icon](Screenshot1.png)
 ![MovieVault Icon](Screenshot2.png)
