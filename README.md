@@ -32,6 +32,7 @@ For any questions or inquiries, contact me at:
 📧 H.MathLogix@gmail.com
 
 
+
 ![MovieVault Icon](Screenshot1.png)
 ![MovieVault Icon](Screenshot2.png)
 ![MovieVault Icon](Screenshot3.png)
