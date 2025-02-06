@@ -72,21 +72,28 @@ from PIL import Image, ImageTk
 
 ################################################################
 
+undo_stack = []
+redo_stack = []
+
 current_table = 'Movies'
 is_movie_database = True
 
-def switch_database_table():
-    update_movie_count()  
+def switch_database_table(event=None):
     global is_movie_database, current_table
-    if is_movie_database:
-        current_table = 'Movies'
-        is_movie_database = False
-    else:
+    
+    if current_table == 'Movies':
         current_table = 'Series'
+        is_movie_database = False
+    elif current_table == 'Series':
+        current_table = 'Unwatched'
+        is_movie_database = False  
+    else:
+        current_table = 'Movies'
         is_movie_database = True
+
     load_data()
-    update_movie_count()  
-    refresh_list()
+    update_movie_count() 
+    refresh_list(event) 
     # messagebox.showinfo("Switched", f"{current_table} Switched!")
 
 ################################################################
@@ -134,7 +141,7 @@ def scan_folder_from_path(path, genre):
     for movie in sorted_movies:
         add_movie(movie, genre)
     
-    refresh_list()
+    refresh_list(event)
 
 ################################################################
 
@@ -150,7 +157,7 @@ def clean_movie_name(movie_name):
 ################################################################
 
 def search_movie_in_google(movie_name):
-    refresh_list()
+    # refresh_list()
     if not movie_name:
         messagebox.showerror("Error", "No movie selected.")
         return
@@ -162,7 +169,7 @@ def search_movie_in_google(movie_name):
         else:
             cleaned_name = movie_name
     else:  
-        cleaned_name = movie_name.replace(".", " ")
+        cleaned_name = re.sub(r"[\.\-_]", " ", movie_name)
         match = re.search(r"(.*?\d{4})", cleaned_name)
         if match:
             cleaned_name = match.group(1)
@@ -186,7 +193,7 @@ def search_movie_in_imdb(movie_name):
         else:
             cleaned_name = movie_name
     else:  
-        cleaned_name = movie_name.replace(".", " ")
+        cleaned_name = re.sub(r"[\.\-_]", " ", movie_name)
         match = re.search(r"(.*?\d{4})", cleaned_name)
         if match:
             cleaned_name = match.group(1)
@@ -226,12 +233,20 @@ def get_selected_movie_name():
 
 ################################################################
 
-def copy_to_clipboard(movie_name):
-    root.clipboard_clear()
-    root.clipboard_append(movie_name)
-    root.update()
-    messagebox.showinfo("Copied", f"'{movie_name}' copied to clipboard!")
+def copy_to_clipboard(event):
+    selected_items = movies_list.curselection()
+    if not selected_items:
+        messagebox.showwarning("Warning", "No movie selected to copy!")
+        return
 
+    movie_display_name = movies_list.get(selected_items[0])
+    movie_original_name = movie_mapping.get(movie_display_name, movie_display_name)
+
+    root.clipboard_clear()
+    root.clipboard_append(movie_original_name)
+    root.update()
+    messagebox.showinfo("Copied", f"'{movie_original_name}' copied to clipboard!")
+    
 ################################################################
 
 def show_context_menu(event):
@@ -240,8 +255,12 @@ def show_context_menu(event):
         selected_movie = movies_list.get(selected_index)
         movie_name = selected_movie.split(" (")[0]  
         context_menu = Menu(root, tearoff=0)
-        context_menu.add_command(label="Copy Movie Name to Clipboard", command=lambda: copy_to_clipboard(movie_name))
-        context_menu.add_command(label="Delete Item", command=lambda: delete_movie_gui())
+        if current_table == "Unwatched":
+            context_menu.add_command(label="Mark as Watched    ", command=lambda: toggle_movie(event), accelerator="Ctrl+W")
+        if current_table == "Movies":
+            context_menu.add_command(label="Mark as Unwatched    ", command=lambda: mark_as_unwatched(event), accelerator="Ctrl+E")
+        context_menu.add_command(label="Copy Name to Clipboard    ", command=lambda: copy_to_clipboard(event), accelerator="Ctrl+C")
+        context_menu.add_command(label="Delete Item", command=lambda: delete_movie_gui(event), accelerator="Del")
         context_menu.add_command(label="Search in Google", command=lambda: search_movie_in_google(get_selected_movie_name()))
         context_menu.add_command(label="Search in IMDb", command=lambda: search_movie_in_imdb(get_selected_movie_name()))
         context_menu.add_command(label="Quit", command=lambda: on_closing()) 
@@ -254,7 +273,8 @@ def show_context_menu(event):
 
 root = Tk()
 root.title("MovieVault")
-root.geometry("900x730")  
+# root.geometry("900x730")  
+root.geometry("920x730") 
 root.iconbitmap("MovieVault.ico") 
 root.resizable(False, False)
 
@@ -288,20 +308,26 @@ def create_tables():
     except sqlite3.OperationalError:
         pass
 
+    c.execute('''CREATE TABLE IF NOT EXISTS Unwatched (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                genre TEXT,
+                adr TEXT)''')
+    conn.commit()
+    try:
+        c.execute("ALTER TABLE Unwatched ADD COLUMN adr TEXT")
+    except sqlite3.OperationalError:
+        pass
+
 create_tables()
 
 ################################################################
-
-# def update_movie_count():
-#     c.execute(f"SELECT COUNT(*) FROM {current_table}")
-#     count = c.fetchone()[0]
-#     movie_count_label.config(text=f"Current Table: {current_table} || Total Items: {count}")
 
 def update_movie_count():
     c.execute(f"SELECT COUNT(*) FROM {current_table}")
     count = c.fetchone()[0]
     
-    table_label1.config(text=f"  Current Table:")
+    table_label1.config(text=f"Current Table:")
     table_label2.config(text=f"{current_table}")
     movie_count_label.config(text=f"|| Total Items: {count}")
 
@@ -316,8 +342,12 @@ def add_movie(name, genre, adr=None):
             messagebox.showinfo("Error", "This item is already in the collection!")
             return False  
 
-        c.execute(f"INSERT INTO {current_table} (name, genre, adr) VALUES (?, ?, ?)", (name, genre, adr))
+        c.execute(f"INSERT OR IGNORE INTO {current_table} (name, genre, adr) VALUES (?, ?, ?)", (name, genre, adr))
         conn.commit()
+        movie_id = c.lastrowid
+        undo_stack.append(("add", [(movie_id, name, genre, adr)]))
+        redo_stack.clear()
+
         update_movie_count()  
         return True
     except Exception as e:
@@ -326,22 +356,26 @@ def add_movie(name, genre, adr=None):
 
 ################################################################
 
-def scan_folder(path, genre):
+def scan_folder(event, path, genre):
     try:
+        new_movies = []
         for root, dirs, files in os.walk(path):  
             for filename in files:
-                if filename.endswith(('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv')):  
+                if filename.endswith(('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv')):
                     clean_name = os.path.basename(filename)  
-                    directory_path = os.path.abspath(root)  
-
+                    directory_path = os.path.abspath(root)
                     c.execute(f"SELECT * FROM {current_table} WHERE name = ?", (clean_name,))
                     if c.fetchone():
                         continue
-
                     c.execute(f"INSERT INTO {current_table} (name, genre, adr) VALUES (?, ?, ?)", (clean_name, genre, directory_path))
                     conn.commit()
-        refresh_list()
-        update_movie_count() 
+                    movie_id = c.lastrowid
+                    new_movies.append((movie_id, clean_name, genre, directory_path))
+        if new_movies:
+            undo_stack.append(("add", new_movies))
+            redo_stack.clear()
+        refresh_list(event)
+        update_movie_count()
     except Exception as e:
         messagebox.showerror("Folder Scan Error", f"An error occurred while scanning the folder: {e}")
     
@@ -383,10 +417,10 @@ def show_movies_gui():
             name = item[1].strip()
             if '.' in name:
                 parts = name.rsplit('.', 1)
-                cleaned_name = parts[0].replace('.', ' ') + '.' + parts[1]
+                cleaned_name = re.sub(r"[\.\-_]", " ", parts[0]) + '.' + parts[1]  # جایگزینی ., - و _
             else:
-                cleaned_name = name
-
+                cleaned_name = re.sub(r"[\.\-_]", " ", name)
+    
             movies_list.insert(END, f"{cleaned_name} ({item[2].strip()})") 
             movie_mapping[f"{cleaned_name} ({item[2].strip()})"] = name
     except Exception as e:
@@ -416,27 +450,32 @@ def bind_enter_key():
 
 ################################################################
 
-def scan_folder_gui():
+def scan_folder_gui(event=None):
     folder_path = filedialog.askdirectory()  
     if folder_path:  
         genre = genre_combobox.get()  
         if not genre:  
             genre = "General"
-        scan_folder(folder_path, genre) 
+        scan_folder(event, folder_path, genre) 
         show_movies_gui()
-        messagebox.showinfo("Success", f"{current_table} scanned and added!")  
+
+        if current_table == 'Unwatched':
+            messagebox.showinfo("Success", f"{current_table} movies scanned and added!")  
+        else:
+            messagebox.showinfo("Success", f"{current_table} scanned and added!")  
+
     # else:
     #     messagebox.showerror("Error", "Please select a folder.")
 
 ################################################################
 
-def scan_folder_from_entry():
+def scan_folder_from_entry(event=None):
     folder_path = path_entry.get() 
     if folder_path:  
         genre = genre_combobox.get()  
         if not genre: 
             genre = "General"
-        scan_folder(folder_path, genre) 
+        scan_folder(event, folder_path, genre) 
         show_movies_gui()
         messagebox.showinfo("Success", "Movies scanned and added!")  
     else:
@@ -444,47 +483,31 @@ def scan_folder_from_entry():
 
 ################################################################
 
-def scan_folder(path, genre):
-    for root, dirs, files in os.walk(path):  
-        for filename in files:
-            if filename.endswith(('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv')): 
-                clean_name = os.path.basename(filename)  
-                directory_path = os.path.dirname(os.path.join(root, filename))  
-
-                c.execute(f"SELECT * FROM {current_table} WHERE name = ?", (clean_name,))
-                if c.fetchone():
-                    continue
-
-                c.execute(f"INSERT INTO {current_table} (name, genre, adr) VALUES (?, ?, ?)", (clean_name, genre, directory_path))
-                conn.commit()
-
-    update_movie_count()
-
-################################################################
-
-def delete_movie_gui():
+def delete_movie_gui(event=None):
     selected_items = movies_list.curselection() 
+    if not selected_items:
+        return
+
+    deleted_movies = []
     for index in selected_items[::-1]:  
         movie_display_name = movies_list.get(index)  
-        movie_original_name = movie_mapping.get(movie_display_name)  
-
+        movie_original_name = movie_mapping.get(movie_display_name)
         if movie_original_name:
-            c.execute(f"DELETE FROM {current_table} WHERE name = ?", (movie_original_name,))  
-    
-    conn.commit() 
-    
-    c.execute(f"SELECT COUNT(*) FROM {current_table}")
-    remaining_rows = c.fetchone()[0]
-    if remaining_rows == 0:  
-        c.execute(f"DELETE FROM sqlite_sequence WHERE name='{current_table}'")
-        conn.commit()
-
+            c.execute(f"SELECT * FROM {current_table} WHERE name = ?", (movie_original_name,))
+            movie_data = c.fetchone()
+            if movie_data:
+                deleted_movies.append(movie_data)  # movie_data = (id, name, genre, adr)
+                c.execute(f"DELETE FROM {current_table} WHERE id = ?", (movie_data[0],))
+    conn.commit()
+    if deleted_movies:
+        undo_stack.append(("remove", deleted_movies))
+        redo_stack.clear()
     update_movie_count()
     show_movies_gui()
 
 ################################################################
 
-def clear_list():
+def clear_list(event=None):
     result = messagebox.askquestion("Are you sure?", "Do you really want to reset the database?")
     if result == 'yes':
         c.execute(f"DELETE FROM {current_table}")  
@@ -496,10 +519,15 @@ def clear_list():
         c.execute("VACUUM") 
         conn.commit()
         
-        movies_list.delete(0, END) 
-        messagebox.showinfo("Success", f"All {current_table.lower()} have been deleted from the database and space has been optimized.")
-    else:
-        messagebox.showinfo("Cancelled", "The operation has been cancelled.")
+        movies_list.delete(0, END)
+
+        if current_table == 'Unwatched':
+            messagebox.showinfo("Success", f"All {current_table.lower()} movies have been deleted from the database and space has been optimized.")
+        else:
+            messagebox.showinfo("Success", f"All {current_table.lower()} have been deleted from the database and space has been optimized.")
+
+    # else:
+    #     messagebox.showinfo("Cancelled", "The operation has been cancelled.")
     
     update_movie_count()
 
@@ -510,7 +538,7 @@ def dynamic_search(event):
     
     if not search_text:
         search_results_label.config(text="") 
-        refresh_list()
+        refresh_list(event)
         return
 
     search_text_cleaned = search_text.replace(" ", ".")  
@@ -525,7 +553,7 @@ def dynamic_search(event):
 
     movies_list.delete(0, END)
     for movie in all_movies.values():
-        cleaned_name = movie[1].replace('.', ' ')  
+        cleaned_name = re.sub(r"[\.\-_]", " ", movie[1])  
         movies_list.insert(END, f"{cleaned_name} ({movie[2]})")
 
     result_count = len(all_movies)
@@ -538,7 +566,7 @@ def dynamic_search(event):
 
 group_search_popup_open = False
 
-def group_search_popup():
+def group_search_popup(event=None):
     global group_search_popup_open
 
     if group_search_popup_open: 
@@ -568,7 +596,7 @@ def group_search_popup():
         search_text = group_search_entry.get().strip()
         if not search_text:
             search_results_label.config(text="")
-            refresh_list()
+            refresh_list(event)
             return
 
         movie_names = [name.strip() for name in search_text.split(",")]
@@ -627,7 +655,7 @@ def group_search_popup():
 
 group_scan_popup_open = False
 
-def group_scan_popup():
+def group_scan_popup(event=None):
     global group_scan_popup_open
 
     if group_scan_popup_open:
@@ -710,7 +738,7 @@ def group_scan_popup():
         for directory in directories:
             if os.path.isdir(directory):  
                 try:
-                    scan_folder(directory, genre) 
+                    scan_folder(event, directory, genre) 
                     successful_scans += 1
                 except Exception as e:
                     messagebox.showerror("Scan Error", f"An error occurred while scanning '{directory}': {e}")
@@ -719,7 +747,7 @@ def group_scan_popup():
         
         if successful_scans > 0:
             on_close()
-            refresh_list()
+            refresh_list(event)
             messagebox.showinfo("Scan Complete", f"Group scan completed successfully for {successful_scans} directories!")
         else:
             messagebox.showwarning("No Scans Performed", "No valid directories were scanned.")
@@ -733,7 +761,7 @@ def group_scan_popup():
 
 ################################################################
 
-def generate_report():
+def generate_report(event=None):
     c.execute(f"SELECT adr, name FROM {current_table}")
     movie_data = c.fetchall()
 
@@ -754,7 +782,7 @@ def generate_report():
 
 ################################################################
 
-def refresh_list():
+def refresh_list(event=None):
     search_results_label.config(text=f"")
     show_movies_gui()
     update_movie_count()
@@ -766,6 +794,12 @@ def on_closing():
 
 ################################################################
 
+def on_enter_current_table1(event):
+    table_label1.config(font=("Segoe UI", 11), bg="#f0f0f0", fg="#000000")
+    event.widget.config(cursor="hand2")
+def on_enter_current_table2(event):
+    table_label2.config(font=("Segoe UI", 11, "bold"), bg="#000000", fg="#FFFFFF" )
+    event.widget.config(cursor="hand2")
 def on_enter_movie(event):
     title_label1.config(font=("Segoe UI", 12, "bold"), bg="#e0e0e0", fg="#3F48CC")
     event.widget.config(cursor="hand2")
@@ -828,6 +862,12 @@ def on_leave_close(event):
 
 ################################################################
 
+def on_leave_current_table1(event):
+    table_label1.config(font=("Segoe UI", 11), bg="#f0f0f0", fg="#333333")
+    event.widget.config(cursor="arrow")
+def on_leave_current_table2(event):
+    table_label2.config(font=("Segoe UI", 11, "bold"), bg="#f0f0f0", fg="#333333")
+    event.widget.config(cursor="arrow")
 def on_leave_movie(event):
     title_label1.config(font=("Segoe UI", 12), bg="#f0f0f0", fg="#333333")
     event.widget.config(cursor="arrow")
@@ -891,7 +931,7 @@ def show_popup(label_text, popup_text):
 
 show_help_open = False
 
-def show_help():
+def show_help(event=None):
     global show_help_open
     if show_help_open:  
         return  
@@ -927,6 +967,13 @@ def show_help():
     overview_text.config(state="disabled")
     overview_text.pack(fill="both", expand=True, padx=10, pady=5)
 
+    features_frame = ttk.Frame(notebook)
+    notebook.add(features_frame, text="Tools & Features")
+    features_text = tk.Text(features_frame, wrap="word", font=body_font, height=10)
+    features_text.insert("1.0", "Key features:\n\n✅ Movie Collection Management: Easily add, remove, and categorize your movies\n\n✅ Search & Filter: Quickly find movies by name\n\n✅ Automatic Folder Scanning\n\n✅ Watched & Unwatched Lists: Organize your movies based on whether you've seen them.\n\n✅ Undo & Redo actions\n\n🚨 Note: The Undo & Redo feature does not support moving movies between the Watched and Unwatched lists. This action must be done manually to avoid inconsistencies in movie tracking.")
+    features_text.config(state="disabled")
+    features_text.pack(fill="both", expand=True, padx=10, pady=5)
+
     buttons_frame = ttk.Frame(notebook)
     notebook.add(buttons_frame, text="Buttons")
     buttons_text = tk.Text(buttons_frame, wrap="word", font=body_font, height=10)
@@ -942,6 +989,7 @@ def show_help():
         "9. Reset Database: Clears all data in the database.\n\n"
         "10. Search on IMDb: Instantly searches the selected movie or series name on IMDb, providing quick access to detailed information, ratings, and reviews."
     )
+    
     buttons_text.config(state="disabled")
     buttons_text.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -999,27 +1047,205 @@ def show_help():
 
 ##############################################
 
+def undo_action(event=None):
+    global undo_stack, redo_stack
+
+    if not undo_stack:
+        messagebox.showinfo("Undo", "No more actions to undo.")
+        return
+
+    op, movies = undo_stack.pop()
+
+    if op == "add":
+        for movie in movies:
+            movie_id, name, genre, adr = movie
+            c.execute(f"DELETE FROM {current_table} WHERE id = ?", (movie_id,))
+        redo_stack.append(("add", movies)) 
+
+    elif op == "remove": 
+        restored_movies = []
+        for movie in movies:
+            movie_id, name, genre, adr = movie
+            c.execute(f"INSERT INTO {current_table} (id, name, genre, adr) VALUES (?, ?, ?, ?)", (movie_id, name, genre, adr))
+            restored_movies.append((movie_id, name, genre, adr))
+        redo_stack.append(("remove", restored_movies)) 
+    conn.commit()
+    refresh_list(event)
+    update_movie_count()
+    show_movies_gui()
+
+##############################################
+
+def redo_action(event=None):
+    global undo_stack, redo_stack
+
+    if not redo_stack:
+        messagebox.showinfo("Redo", "No more actions to redo.")
+        return
+
+    op, movies = redo_stack.pop()
+
+    if op == "add": 
+        for movie in movies:
+            movie_id, name, genre, adr = movie
+            c.execute(f"DELETE FROM {current_table} WHERE id = ?", (movie_id,))
+        undo_stack.append(("add", movies))
+
+    elif op == "remove": 
+        for movie in movies:
+            movie_id, name, genre, adr = movie
+            c.execute(f"DELETE FROM {current_table} WHERE id = ?", (movie_id,))
+        undo_stack.append(("remove", movies))
+    conn.commit()
+    refresh_list(event)
+    update_movie_count()
+    show_movies_gui()
+
+##############################################
+
+def toggle_movie(event=None):
+    if current_table != "Unwatched":
+        messagebox.showwarning("Warning", "The 'Mark as Watched' feature is only available in the 'Unwatched' list.")
+        return
+
+    selected_items = movies_list.curselection()
+    if not selected_items:
+        messagebox.showwarning("Warning", "No movie selected to toggle!")
+        return
+
+    for index in selected_items[::-1]:
+        movie_display_name = movies_list.get(index)
+        movie_original_name = movie_mapping.get(movie_display_name, movie_display_name)
+
+        c.execute(f"SELECT * FROM Unwatched WHERE name = ?", (movie_original_name,))
+        movie_data = c.fetchone()
+
+        if movie_data:
+            c.execute("INSERT INTO Movies (name, genre, adr) VALUES (?, ?, ?)", (movie_data[1], movie_data[2], movie_data[3]))
+            c.execute("DELETE FROM Unwatched WHERE id = ?", (movie_data[0],))
+
+    conn.commit()
+    # messagebox.showinfo("Success", "Selected movies have been marked as watched and moved to the main list.")
+
+    update_movie_count()
+    refresh_list()
+
+##############################################
+
+def mark_as_unwatched(event=None):
+    if current_table != "Movies":
+        messagebox.showwarning("Warning", "The 'Mark as Unwatched' feature is only available in the 'Movies' list.")
+        return
+
+    selected_items = movies_list.curselection()
+    if not selected_items:
+        messagebox.showwarning("Warning", "No movie selected to toggle!")
+        return
+
+    for index in selected_items[::-1]:  
+        movie_display_name = movies_list.get(index)
+        movie_original_name = movie_mapping.get(movie_display_name, movie_display_name)
+
+        c.execute(f"SELECT * FROM Movies WHERE name = ?", (movie_original_name,))
+        movie_data = c.fetchone()
+
+        if movie_data:
+            c.execute("INSERT INTO Unwatched (name, genre, adr) VALUES (?, ?, ?)", (movie_data[1], movie_data[2], movie_data[3]))
+            c.execute("DELETE FROM Movies WHERE id = ?", (movie_data[0],))
+
+    conn.commit()
+    # messagebox.showinfo("Success", "Selected movies have been marked as unwatched and moved back to the 'Unwatched' list.")
+
+    update_movie_count()
+    refresh_list()
+
+##############################################
+
+def restore_backup(event=None):
+    backup_file = filedialog.askopenfilename(title="Select Backup File", filetypes=[("SQLite files", "*.db"), ("All files", "*.*")])
+    
+    if not backup_file:
+        return
+
+    conn_current = sqlite3.connect('VAULT.db')
+    c_current = conn_current.cursor()
+
+    try:
+        conn_backup = sqlite3.connect(backup_file) 
+        c_backup = conn_backup.cursor()
+
+        c_current.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        current_tables = set(row[0] for row in c_current.fetchall()) 
+
+        c_backup.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        backup_tables = set(row[0] for row in c_backup.fetchall())  
+
+        if current_tables != backup_tables:
+            messagebox.showerror("Error", "Backup database structure does not match current database structure.")
+            return
+        
+        c_current.execute("SELECT MAX(id) FROM Movies")
+        max_id_current = c_current.fetchone()[0] or 0
+
+        for table in backup_tables:
+            c_backup.execute(f"SELECT * FROM {table}")
+            rows = c_backup.fetchall()
+
+            for row in rows:
+                new_id = max_id_current + 1
+                new_row = (new_id,) + row[1:]  
+
+                placeholders = ', '.join(['?'] * len(new_row)) 
+                c_current.execute(f"INSERT OR IGNORE INTO {table} VALUES ({placeholders})", new_row)
+
+                max_id_current += 1
+
+        conn_current.commit()  
+        
+        show_movies_gui()
+        refresh_list(event)
+        update_movie_count()
+        messagebox.showinfo("Success", "Backup restored successfully!")
+
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred while restoring backup: {e}")
+    
+    finally:
+        conn_backup.close()
+        conn_current.close()
+
+##############################################
+
 menubar = tk.Menu(root)
 
 file_menu = tk.Menu(menubar, tearoff=0)           
-
-file_menu.add_command(label="Directory Scan", command=scan_folder_gui)
-file_menu.add_command(label="Group Scan", command=group_scan_popup)
-file_menu.add_command(label="Group Search", command=group_search_popup)
-file_menu.add_command(label="Switch Database", command=switch_database_table)
-file_menu.add_command(label="Refresh List", command=refresh_list)
-file_menu.add_command(label="Generate Report", command=generate_report)
-file_menu.add_command(label="Reset Database", command=clear_list)
+file_menu.add_command(label="Directory Scan", command=scan_folder_gui, accelerator="Ctrl+S")
+file_menu.add_command(label="Group Scan", command=group_scan_popup, accelerator="Ctrl+G")
+file_menu.add_command(label="Group Search", command=group_search_popup, accelerator="Ctrl+F")
+file_menu.add_command(label="Generate Report", command=generate_report, accelerator="Ctrl+R")
+file_menu.add_command(label="Restore Backup", command=restore_backup, accelerator="Ctrl+B")
+file_menu.add_command(label="Switch Database", command=switch_database_table, accelerator="Ctrl+Shft")
+file_menu.add_command(label="Refresh List", command=refresh_list, accelerator="F5")
+file_menu.add_command(label="Reset Database", command=clear_list, accelerator="F12")
 file_menu.add_command(label="IMDb: Top 250 Movies", command=IMDb_Top_250)
 file_menu.add_command(label="IMDb: Most Popular Movies", command=Most_Popular_Movies)
 file_menu.add_command(label="IMDb: Top 250 TV Shows", command=Top_250_TV_Shows)
 file_menu.add_command(label="IMDb: Most Popular TV Shows", command=Most_Popular_TV_Shows)
-file_menu.add_command(label="Exit", command=root.destroy)
+file_menu.add_command(label="Exit", command=root.destroy, accelerator="Alt+F4")
 menubar.add_cascade(label="Menu", menu=file_menu)
 
+menu2 = tk.Menu(menubar, tearoff=0)
+menu2.add_command(label="Mark as Watched    ", command=toggle_movie, accelerator="Ctrl+W")
+menu2.add_command(label="Mark as Unwatched    ", command=mark_as_unwatched, accelerator="Ctrl+E")
+menu2.add_command(label="Undo    ", command=undo_action, accelerator="Ctrl+Z")
+menu2.add_command(label="Redo    ", command=redo_action, accelerator="Ctrl+Y")
+menu2.add_command(label="Delete    ", command=delete_movie_gui, accelerator="Del")
+menubar.add_cascade(label="Tools", menu=menu2)
+
 help_menu = tk.Menu(menubar, tearoff=0)
-help_menu.add_command(label="Help", command=show_help)
+help_menu.add_command(label="Help    ", command=show_help, accelerator="F8")
 menubar.add_cascade(label="Help", menu=help_menu)
+
 root.config(menu=menubar)
 
 ################################################################
@@ -1033,11 +1259,6 @@ left_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
 right_frame = Frame(main_frame)
 right_frame.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
 
-# report_label1 = tk.Label(left_frame, text="", height=1)
-# report_label1.pack()
-# report_label1 = tk.Label(right_frame, text="", height=1)
-# report_label1.pack()
-
 movie_icon = Image.open("add2.png").resize((40, 40))  
 movie_icon = ImageTk.PhotoImage(movie_icon)
 title_label1 = tk.Label(left_frame, text="Add a New Movie/ Serie                              ", font=("Segoe UI", 12), height=40, compound="right", image=movie_icon, bg="#f0f0f0", fg="#333333")
@@ -1048,9 +1269,6 @@ title_label1.bind("<Button-1>", lambda event: show_popup("Add a New Movie/Serie"
 
 movie_name_entry = Entry(left_frame, width=50, font=("Segoe UI", 10))
 movie_name_entry.pack(pady=5)
-
-# report_label1 = tk.Label(left_frame, text="", height=1)
-# report_label1.pack()
 
 genre_icon = Image.open("genre.png").resize((40, 40))  
 genre_icon = ImageTk.PhotoImage(genre_icon)
@@ -1076,9 +1294,6 @@ search_entry = Entry(right_frame, width=50, font=("Segoe UI", 10))
 search_entry.pack(pady=5)
 search_entry.bind("<KeyRelease>", dynamic_search)
 
-# report_label1 = tk.Label(right_frame, text="", height=1)
-# report_label1.pack()
-
 path_icon = Image.open("path.png").resize((40, 40))  
 path_icon = ImageTk.PhotoImage(path_icon)
 path_label = Label(right_frame, text="Enter Folder Path to Scan                             ", font=("Segoe UI", 12), height=40, compound="right", image=path_icon, bg="#f0f0f0", fg="#333333")
@@ -1088,16 +1303,21 @@ path_label.bind("<Leave>", on_leave_path)
 path_label.bind("<Button-1>", lambda event: show_popup("Enter Folder Path", " Provide the folder path where your movies or series are stored. Right click on the desired file or directory and use the {Copy as path} option. Please remember not to attempt typing the address."))
 path_entry = Entry(right_frame, width=50, font=("Segoe UI", 10))
 path_entry.pack(pady=5)
-path_entry.bind("<KeyRelease>", lambda event: scan_folder_from_entry())
+path_entry.bind("<KeyRelease>", lambda event: scan_folder_from_entry(event))
 
 search_results_label = Label(root, text="", font=("Segoe UI", 12, "bold"), fg="#1E9C43")
 search_results_label.pack(pady=5)
-# search_count_label = tk.Label(root, text="", font=("Segoe UI", 12, "bold"), fg="#1E9C43")
-# search_count_label.pack(pady=0)
 
-movies_list = Listbox(root, selectmode="extended", width=149, height=25)
-movies_list.pack(pady=5)
+list_frame = Frame(root)
+list_frame.pack(pady=5)
+
+movies_list = Listbox(list_frame, selectmode="extended", width=149, height=25)
+movies_list.grid(row=0, column=0, sticky="ns")
+scrollbar = Scrollbar(list_frame, orient=VERTICAL, command=movies_list.yview)
+movies_list.configure(yscrollcommand=scrollbar.set)
 movies_list.bind("<Button-3>", show_context_menu)
+movies_list.bind("<Double-Button-1>", lambda event: toggle_movie(event))
+scrollbar.grid(row=0, column=1, sticky="ns")
 
 add_movie_img = PhotoImage(file="add.png")
 add_movie_button = Button(root, image=add_movie_img, command=add_movie_gui)
@@ -1171,17 +1391,40 @@ imdb_button.bind("<Leave>", on_leave_add)
 
 # movie_count_label = tk.Label(root, text=f"Total Items: ", font=("Segoe UI", 12))
 # movie_count_label.pack(side=tk.LEFT, padx=5)
+
+table_label0 = tk.Label(root, text="", font=("Segoe UI", 11))
+table_label0.pack(side=tk.LEFT, padx=5)
+
 table_label1 = tk.Label(root, text="", font=("Segoe UI", 11))
 table_label1.pack(side=tk.LEFT, padx=0)
+table_label1.bind("<Enter>", on_enter_current_table1)
+table_label1.bind("<Leave>", on_leave_current_table1)
+table_label1.bind("<Button-1>", lambda event: switch_database_table(event))
+
 table_label2 = tk.Label(root, text="", font=("Segoe UI", 11, "bold"))
 table_label2.pack(side=tk.LEFT, padx=0)
+table_label2.bind("<Enter>", on_enter_current_table2)
+table_label2.bind("<Leave>", on_leave_current_table2)
+table_label2.bind("<Button-1>", lambda event: switch_database_table(event))
+
 movie_count_label = tk.Label(root, text="", font=("Segoe UI", 11))
 movie_count_label.pack(side=tk.LEFT, padx=0)
 
-scrollbar = Scrollbar(root, orient=VERTICAL, command=movies_list.yview)
-movies_list.configure(yscrollcommand=scrollbar.set)
-
-scrollbar.pack(side=RIGHT, fill=Y)
+root.bind("<Delete>", lambda event: delete_movie_gui(event))
+root.bind("<Control-w>", lambda event: toggle_movie(event))
+root.bind("<Control-e>", lambda event: mark_as_unwatched(event))
+root.bind("<Control-c>", lambda event: copy_to_clipboard(event))
+root.bind("<Control-z>", lambda event: undo_action(event))
+root.bind("<Control-y>", lambda event: redo_action(event))
+root.bind("<Control-Shift_L>", lambda event: switch_database_table(event))
+root.bind("<Control-r>", lambda event: generate_report(event))
+root.bind("<Control-b>", lambda event: restore_backup(event))
+root.bind("<F5>", lambda event: refresh_list(event))
+root.bind("<F12>", lambda event: clear_list(event))
+root.bind("<Control-s>", lambda event: scan_folder_gui(event))
+root.bind("<Control-g>", lambda event: group_scan_popup(event))
+root.bind("<Control-f>", lambda event: group_search_popup(event))
+root.bind("<F8>", lambda event: show_help(event))
 
 update_movie_count()
 
@@ -1189,6 +1432,6 @@ bind_enter_key()
 show_movies_gui()
 update_movie_count() 
 
+root.focus_set()
 root.mainloop()
 conn.close()
-root.mainloop()
